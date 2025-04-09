@@ -1,0 +1,741 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>兜兜英语背单词</title>
+    <script src="https://unpkg.com/@tailwindcss/browser@4"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.7.2/css/all.min.css" rel="stylesheet">
+    <!-- 引入 SheetJS 库 -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+    <!-- 引入 LeanCloud SDK -->
+    <script src="https://cdn.jsdelivr.net/npm/leancloud-storage@4.15.0/dist/av-min.js"></script>
+    <script>
+        // 初始化 LeanCloud
+        const APP_ID = 'QWYwfiGZ7tWJsZZwSD8bzylJ-gzGzoHsz';
+        const APP_KEY = 'ZZYZoKb2kjqNvL5ag9SLWwd1';
+        const SERVER_URL = 'https://qwywfigz.lc-cn-n1-shared.com';
+
+        AV.init({
+            appId: APP_ID,
+            appKey: APP_KEY,
+            serverURL: SERVER_URL
+        });
+
+        // 替换原有的数据声明
+        let words = [];
+        let statistics = {};
+        let quizResults = [];
+
+        // 新增云端数据同步方法
+        async function syncCloudData() {
+            try {
+                const cloudData = await new AV.Query('AppData').first();
+                if (cloudData) {
+                    words = cloudData.get('words') || [];
+                    statistics = cloudData.get('statistics') || {};
+                    quizResults = cloudData.get('quizResults') || [];
+                    console.log('从云端加载数据成功');
+                }
+            } catch (error) {
+                console.error('云端数据加载失败:', error);
+            }
+        }
+
+        // 替换原有的 saveData 函数
+        async function saveData() {
+            try {
+                let cloudData = await new AV.Query('AppData').first();
+                if (!cloudData) {
+                    cloudData = new AV.Object('AppData');
+                }
+                cloudData.set('words', words);
+                cloudData.set('statistics', statistics);
+                cloudData.set('quizResults', quizResults);
+                await cloudData.save();
+                console.log('数据已保存到云端');
+                // 保存成功后重新同步数据并更新统计信息
+                await syncCloudData();
+                updateStatistics();
+            } catch (error) {
+                console.error('云端保存失败:', error);
+                alert('数据保存到云端失败，请检查网络或稍后重试。');
+            }
+        }
+
+        const LEVELS = {
+            RED: '🔴 红区（高频错误词）',
+            YELLOW: '🟡 黄区（间歇错误词）',
+            GREEN_NEW: '🟢 绿区（新学未测词）',
+            GREEN_TESTED: '🟢 绿区（已测验词）',
+            BLUE: '🔵 蓝区（稳定掌握词）'
+        };
+
+        function importWords() {
+            const input = document.getElementById('word-input').value;
+            const lines = input.split('\n');
+            const newWords = [];
+            const duplicateWords = [];
+
+            for (let line of lines) {
+                if (line) {
+                    const [word, meaning] = line.split('-');
+                    const isDuplicate = words.some(w => w.word === word.trim());
+                    if (isDuplicate) {
+                        duplicateWords.push(word);
+                    } else {
+                        newWords.push({ word: word.trim(), meaning: meaning.trim(), lastReviewed: null, level: LEVELS.GREEN_NEW, consecutiveCorrect: 0 });
+                    }
+                }
+            }
+
+            if (duplicateWords.length > 0) {
+                const confirmMessage = `以下英语单词已存在于词库中：${duplicateWords.join(', ')}。是否仍要导入这些重复单词？`;
+                const shouldImport = confirm(confirmMessage);
+                if (!shouldImport) {
+                    document.getElementById('word-input').value = '';
+                    return;
+                }
+            }
+
+            newWords.forEach(newWord => {
+                words.push(newWord);
+                if (!statistics[newWord.word]) {
+                    statistics[newWord.word] = {
+                        total: 0,
+                        correct: 0,
+                        wrong: 0
+                    };
+                }
+            });
+
+            duplicateWords.forEach(duplicateWord => {
+                const line = lines.find(l => l.startsWith(duplicateWord));
+                const [word, meaning] = line.split('-');
+                words.push({ word: word.trim(), meaning: meaning.trim(), lastReviewed: null, level: LEVELS.GREEN_NEW, consecutiveCorrect: 0 });
+                if (!statistics[word.trim()]) {
+                    statistics[word.trim()] = {
+                        total: 0,
+                        correct: 0,
+                        wrong: 0
+                    };
+                }
+            });
+
+            updateStatistics();
+            document.getElementById('word-input').value = '';
+            saveData();
+            console.log('导入英语词库后，words:', words);
+            console.log('导入英语词库后，statistics:', statistics);
+        }
+
+        function updateStatistics() {
+            const tableBody = document.getElementById('statistics-table-body');
+            tableBody.innerHTML = '';
+            const sortedWords = words.slice().sort((a, b) => {
+                const statA = statistics[a.word];
+                const statB = statistics[b.word];
+                const errorRateA = statA.total > 0 ? statA.wrong / statA.total : 0;
+                const errorRateB = statB.total > 0 ? statB.wrong / statB.total : 0;
+                return errorRateB - errorRateA;
+            });
+            sortedWords.forEach(wordObj => {
+                const { word, meaning, level } = wordObj;
+                const stat = statistics[word];
+                const errorRate = stat.total > 0 ? Math.round(stat.wrong / stat.total * 100) + '%' : '0%';
+                const row = tableBody.insertRow();
+                row.insertCell().textContent = word;
+                row.insertCell().textContent = meaning;
+
+                const totalCell = row.insertCell();
+                const totalInput = document.createElement('input');
+                totalInput.type = 'number';
+                totalInput.value = stat.total;
+                totalInput.addEventListener('change', function () {
+                    const newTotal = parseInt(this.value);
+                    if (!isNaN(newTotal) && newTotal >= 0) {
+                        stat.total = newTotal;
+                        if (stat.correct > newTotal) {
+                            stat.correct = newTotal;
+                        }
+                        if (stat.wrong > newTotal) {
+                            stat.wrong = newTotal - stat.correct;
+                        }
+                        updateStatistics();
+                        saveData();
+                    }
+                });
+                totalCell.appendChild(totalInput);
+
+                const correctCell = row.insertCell();
+                const correctInput = document.createElement('input');
+                correctInput.type = 'number';
+                correctInput.value = stat.correct;
+                correctInput.addEventListener('change', function () {
+                    const newCorrect = parseInt(this.value);
+                    if (!isNaN(newCorrect) && newCorrect >= 0 && newCorrect <= stat.total) {
+                        stat.correct = newCorrect;
+                        stat.wrong = stat.total - newCorrect;
+                        updateStatistics();
+                        saveData();
+                    }
+                });
+                correctCell.appendChild(correctInput);
+
+                const wrongCell = row.insertCell();
+                const wrongInput = document.createElement('input');
+                wrongInput.type = 'number';
+                wrongInput.value = stat.wrong;
+                wrongInput.addEventListener('change', function () {
+                    const newWrong = parseInt(this.value);
+                    if (!isNaN(newWrong) && newWrong >= 0 && newWrong <= stat.total) {
+                        stat.wrong = newWrong;
+                        stat.correct = stat.total - newWrong;
+                        updateStatistics();
+                        saveData();
+                    }
+                });
+                wrongCell.appendChild(wrongInput);
+
+                row.insertCell().textContent = stat.total > 0 ? Math.round(stat.wrong / stat.total * 100) + '%' : '0%';
+                const displayLevel = stat.total > 0 && level === LEVELS.GREEN_NEW ? LEVELS.GREEN_TESTED : level;
+                row.insertCell().textContent = displayLevel;
+
+                const actionCell = row.insertCell();
+                const deleteButton = document.createElement('button');
+                deleteButton.textContent = '删除';
+                deleteButton.classList.add('bg-red-600', 'text-white', 'py-2', 'px-4', 'rounded-md', 'hover:bg-red-700', 'transition-colors', 'text-sm', 'shadow-md');
+                deleteButton.addEventListener('click', function () {
+                    const confirmDelete = confirm(`确定要删除英语单词 ${word} 的记录吗？`);
+                    if (confirmDelete) {
+                        words = words.filter(w => w.word!== word);
+                        delete statistics[word];
+                        updateStatistics();
+                        saveData();
+                    }
+                });
+                actionCell.appendChild(deleteButton);
+            });
+            console.log('更新英语统计信息后，words:', words);
+            console.log('更新英语统计信息后，statistics:', statistics);
+        }
+
+        function randomQuiz() {
+            const filterInput = document.getElementById('filter-input');
+            filterInput.style.display = 'none';
+            const selectionList = document.getElementById('selection-list');
+            selectionList.style.display = 'none';
+
+            const redWords = words.filter(word => word.level === LEVELS.RED).sort((a, b) => statistics[b.word].total - statistics[a.word].total);
+            const yellowWords = words.filter(word => word.level === LEVELS.YELLOW).sort((a, b) => statistics[b.word].total - statistics[a.word].total);
+            const greenWords = words.filter(word => [LEVELS.GREEN_NEW, LEVELS.GREEN_TESTED].includes(word.level)).sort(() => Math.random() - 0.5);
+            const otherWords = words.filter(word => ![LEVELS.RED, LEVELS.YELLOW, LEVELS.GREEN_NEW, LEVELS.GREEN_TESTED].includes(word.level)).sort((a, b) => statistics[b.word].total - statistics[a.word].total);
+
+            let quizWords = [];
+
+            // 选取红区单词
+            quizWords = quizWords.concat(redWords.slice(0, 5));
+            if (quizWords.length < 5) {
+                const remaining = 5 - quizWords.length;
+                quizWords = quizWords.concat(yellowWords.slice(0, remaining));
+                if (quizWords.length < 5) {
+                    const stillRemaining = 5 - quizWords.length;
+                    quizWords = quizWords.concat(greenWords.slice(0, stillRemaining));
+                    if (quizWords.length < 5) {
+                        const finalRemaining = 5 - quizWords.length;
+                        quizWords = quizWords.concat(otherWords.slice(0, finalRemaining));
+                    }
+                }
+            }
+
+            // 选取黄区单词
+            const currentLength = quizWords.length;
+            quizWords = quizWords.concat(yellowWords.filter(word => !quizWords.includes(word)).slice(0, 3 - (currentLength - 5)));
+            if (quizWords.length < currentLength + 3 - (currentLength - 5)) {
+                const remaining = (currentLength + 3 - (currentLength - 5)) - quizWords.length;
+                quizWords = quizWords.concat(greenWords.filter(word => !quizWords.includes(word)).slice(0, remaining));
+                if (quizWords.length < currentLength + 3 - (currentLength - 5)) {
+                    const stillRemaining = (currentLength + 3 - (currentLength - 5)) - quizWords.length;
+                    quizWords = quizWords.concat(otherWords.filter(word => !quizWords.includes(word)).slice(0, stillRemaining));
+                }
+            }
+
+            // 选取绿区单词
+            const currentLengthAfterYellow = quizWords.length;
+            quizWords = quizWords.concat(greenWords.filter(word => !quizWords.includes(word)).slice(0, 2 - (currentLengthAfterYellow - 8)));
+            if (quizWords.length < currentLengthAfterYellow + 2 - (currentLengthAfterYellow - 8)) {
+                const remaining = (currentLengthAfterYellow + 2 - (currentLengthAfterYellow - 8)) - quizWords.length;
+                quizWords = quizWords.concat(otherWords.filter(word => !quizWords.includes(word)).slice(0, remaining));
+            }
+
+            showQuizWords(quizWords);
+            lastQuizTime = Date.now();
+        }
+
+        function showSelectionList() {
+            const quizWordsDiv = document.getElementById('quiz-words');
+            quizWordsDiv.innerHTML = '';
+            const filterInput = document.getElementById('filter-input');
+            filterInput.style.display = 'none';
+            const selectionList = document.getElementById('selection-list');
+            selectionList.style.display = 'block';
+            const tableBody = document.getElementById('selection-list-table-body');
+            tableBody.innerHTML = '';
+            const sortedWords = words.slice().sort((a, b) => {
+                const statA = statistics[a.word];
+                const statB = statistics[b.word];
+                const errorRateA = statA.total > 0 ? statA.wrong / statA.total : 0;
+                const errorRateB = statB.total > 0 ? statB.wrong / statB.total : 0;
+                return errorRateB - errorRateA;
+            });
+            sortedWords.forEach((wordObj, index) => {
+                const { word, meaning, level } = wordObj;
+                const stat = statistics[word];
+                const errorRate = stat.total > 0 ? Math.round(stat.wrong / stat.total * 100) + '%' : '0%';
+                const row = tableBody.insertRow();
+                const checkboxCell = row.insertCell();
+                const checkbox = document.createElement('input');
+                checkbox.type = 'checkbox';
+                checkbox.dataset.word = JSON.stringify(wordObj);
+                checkboxCell.appendChild(checkbox);
+                row.insertCell().textContent = word;
+                row.insertCell().textContent = meaning;
+                row.insertCell().textContent = stat.total;
+                row.insertCell().textContent = errorRate;
+                const displayLevel = stat.total > 0 && level === LEVELS.GREEN_NEW ? LEVELS.GREEN_TESTED : level;
+                row.insertCell().textContent = displayLevel;
+            });
+            const searchInput = document.getElementById('selection-search');
+            searchInput.value = '';
+            searchInput.addEventListener('input', function () {
+                const searchTerm = this.value.toLowerCase();
+                const rows = tableBody.querySelectorAll('tr');
+                rows.forEach(row => {
+                    const wordCell = row.cells[1];
+                    const meaningCell = row.cells[2];
+                    const word = wordCell.textContent.toLowerCase();
+                    const meaning = meaningCell.textContent.toLowerCase();
+                    if (word.includes(searchTerm) || meaning.includes(searchTerm)) {
+                        row.style.display = '';
+                    } else {
+                        row.style.display = 'none';
+                    }
+                });
+            });
+            console.log('英语自主选题列表已显示');
+        }
+
+        function showQuizWords(quizWords) {
+            const quizWordsDiv = document.getElementById('quiz-words');
+            quizWordsDiv.innerHTML = '';
+            quizWords.forEach(wordObj => {
+                const { word, meaning } = wordObj;
+                const wordRow = document.createElement('div');
+                wordRow.classList.add('flex', 'flex-col', 'md:flex-row', 'items-center', 'mb-6', 'p-4', 'bg-gray-50', 'rounded-lg', 'shadow-md');
+                const wordMeaning = document.createElement('div');
+                wordMeaning.classList.add('flex-1', 'min-w-[200px]', 'text-xl', 'mb-4', 'md:mb-0', 'md:mr-6');
+                wordMeaning.textContent = meaning;
+                const showButton = document.createElement('button');
+                showButton.textContent = '显示英文';
+                showButton.classList.add('bg-blue-600', 'text-white', 'py-3', 'px-6', 'rounded-md', 'hover:bg-blue-700', 'transition-colors', 'mr-6', 'mb-4', 'md:mb-0', 'shadow-md');
+                let isShowingEnglish = false;
+                showButton.onclick = function () {
+                    if (isShowingEnglish) {
+                        wordMeaning.textContent = meaning;
+                        showButton.textContent = '显示英文';
+                    } else {
+                        wordMeaning.textContent = word;
+                        showButton.textContent = '显示中文';
+                    }
+                    isShowingEnglish = !isShowingEnglish;
+                };
+                const correctButton = document.createElement('button');
+                correctButton.textContent = '正确';
+                correctButton.classList.add('bg-green-600', 'text-white', 'py-3', 'px-6', 'rounded-md', 'hover:bg-green-700', 'transition-colors', 'mr-6', 'mb-4', 'md:mb-0', 'shadow-md');
+                const wrongButton = document.createElement('button');
+                wrongButton.textContent = '错误';
+                wrongButton.classList.add('bg-red-600', 'text-white', 'py-3', 'px-6', 'rounded-md', 'hover:bg-red-700', 'transition-colors', 'shadow-md');
+
+                const handleAnswer = function (isCorrect, clickedButton) {
+                    const wordIndex = words.findIndex(w => w.word === word);
+                    if (isCorrect) {
+                        statistics[word].correct++;
+                        statistics[word].total++;
+                        words[wordIndex].consecutiveCorrect++;
+                        if (words[wordIndex].consecutiveCorrect >= 3) {
+                            upgradeLevel(wordIndex);
+                        }
+                    } else {
+                        statistics[word].wrong++;
+                        statistics[word].total++;
+                        words[wordIndex].consecutiveCorrect = 0;
+                        downgradeLevel(wordIndex);
+                    }
+                    if (words[wordIndex].level === LEVELS.GREEN_NEW && statistics[word].total > 0) {
+                        words[wordIndex].level = LEVELS.GREEN_TESTED;
+                    }
+                    updateStatistics();
+                    saveData();
+                    // 仅将点击的按钮变灰
+                    clickedButton.disabled = true;
+                    clickedButton.classList.remove(clickedButton.classList.contains('bg-green-600') ? 'bg-green-600' : 'bg-red-600');
+                    clickedButton.classList.remove(clickedButton.classList.contains('hover:bg-green-700') ? 'hover:bg-green-700' : 'hover:bg-red-700');
+                    clickedButton.classList.add('bg-gray-400', 'cursor-not-allowed');
+                    // 禁用另一个按钮但不变颜色
+                    const otherButton = clickedButton === correctButton ? wrongButton : correctButton;
+                    otherButton.disabled = true;
+
+                    const currentDate = new Date().toLocaleDateString();
+                    const existingResultIndex = quizResults.findIndex(result => result.date === currentDate);
+                    if (existingResultIndex !== -1) {
+                        if (isCorrect) {
+                            quizResults[existingResultIndex].correct++;
+                        } else {
+                            quizResults[existingResultIndex].wrong++;
+                        }
+                    } else {
+                        quizResults.push({
+                            date: currentDate,
+                            correct: isCorrect ? 1 : 0,
+                            wrong: isCorrect ? 0 : 1
+                        });
+                    }
+                };
+
+                correctButton.onclick = function () {
+                    handleAnswer(true, this);
+                };
+
+                wrongButton.onclick = function () {
+                    handleAnswer(false, this);
+                };
+
+                wordRow.appendChild(wordMeaning);
+                const buttonGroup = document.createElement('div');
+                buttonGroup.classList.add('flex', 'flex-wrap', 'items-center', 'gap-6', 'min-w-[300px]');
+                buttonGroup.appendChild(showButton);
+                buttonGroup.appendChild(correctButton);
+                buttonGroup.appendChild(wrongButton);
+                wordRow.appendChild(buttonGroup);
+                quizWordsDiv.appendChild(wordRow);
+            });
+        }
+
+        function upgradeLevel(index) {
+            const word = words[index];
+            switch (word.level) {
+                case LEVELS.RED:
+                    word.level = LEVELS.YELLOW;
+                    break;
+                case LEVELS.YELLOW:
+                    word.level = LEVELS.GREEN_TESTED;
+                    break;
+                case LEVELS.GREEN_NEW:
+                case LEVELS.GREEN_TESTED:
+                    word.level = LEVELS.BLUE;
+                    break;
+            }
+            word.consecutiveCorrect = 0;
+        }
+
+        function downgradeLevel(index) {
+            const word = words[index];
+            switch (word.level) {
+                case LEVELS.BLUE:
+                    word.level = LEVELS.GREEN_TESTED;
+                    break;
+                case LEVELS.GREEN_NEW:
+                case LEVELS.GREEN_TESTED:
+                    word.level = LEVELS.YELLOW;
+                    break;
+                case LEVELS.YELLOW:
+                    word.level = LEVELS.RED;
+                    break;
+            }
+        }
+
+        function exportToExcel() {
+            const table = document.querySelector('#statistics table');
+            const wb = XLSX.utils.table_to_book(table);
+            const ws = wb.Sheets[wb.SheetNames[0]];
+
+            // 处理输入框的值
+            const rows = table.querySelectorAll('tbody tr');
+            rows.forEach((row, rowIndex) => {
+                const cells = row.querySelectorAll('td');
+                cells.forEach((cell, colIndex) => {
+                    const input = cell.querySelector('input');
+                    if (input) {
+                        const cellAddress = XLSX.utils.encode_cell({ r: rowIndex + 1, c: colIndex });
+                        const value = parseInt(input.value);
+                        if (!isNaN(value)) {
+                            ws[cellAddress].v = value;
+                            ws[cellAddress].t = 'n'; // 设置单元格类型为数字
+                        }
+                    }
+                });
+            });
+
+            // 自动调整列宽
+            const range = XLSX.utils.decode_range(ws['!ref']);
+            const colWidths = [];
+            for (let C = range.s.c; C <= range.e.c; ++C) {
+                let maxWidth = 0;
+                for (let R = range.s.r; R <= range.e.r; ++R) {
+                    const cell = ws[XLSX.utils.encode_cell({ r: R, c: C })];
+                    if (cell && cell.v) {
+                        const cellWidth = ('' + cell.v).length;
+                        if (cellWidth > maxWidth) {
+                            maxWidth = cellWidth;
+                        }
+                    }
+                }
+                colWidths[C] = { wch: maxWidth + 2 }; // 增加一些额外的宽度
+            }
+            ws['!cols'] = colWidths;
+
+            const wbout = XLSX.write(wb, { bookType: 'xlsx', bookSST: true, type: 'binary' });
+            function s2ab(s) {
+                const buf = new ArrayBuffer(s.length);
+                const view = new Uint8Array(buf);
+                for (let i = 0; i < s.length; i++) view[i] = s.charCodeAt(i) & 0xFF;
+                return buf;
+            }
+            const blob = new Blob([s2ab(wbout)], { type: 'application/octet-stream' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'english_word_statistics.xlsx';
+            a.click();
+            URL.revokeObjectURL(url);
+        }
+
+        function clearData() {
+            const confirmClear = confirm('确定要清空所有英语数据吗？');
+            if (confirmClear) {
+                words = [];
+                statistics = {};
+                quizResults = [];
+                updateStatistics();
+                saveData();
+                console.log('英语数据已清空');
+            }
+        }
+
+        function applySelection() {
+            const checkboxes = document.querySelectorAll('#selection-list input[type="checkbox"]');
+            const selectedWords = [];
+            checkboxes.forEach(checkbox => {
+                if (checkbox.checked) {
+                    const selectedWord = JSON.parse(checkbox.dataset.word);
+                    if (selectedWord) {
+                        selectedWords.push(selectedWord);
+                    }
+                }
+            });
+            showQuizWords(selectedWords);
+            const selectionList = document.getElementById('selection-list');
+            selectionList.style.display = 'none';
+        }
+
+        // 修改页面加载逻辑
+        window.onload = async function () {
+            showLoading();
+            await syncCloudData();
+            updateStatistics();
+            hideLoading();
+        };
+
+        function showLoading() {
+            document.getElementById('loading').style.display = 'flex';
+        }
+
+        function hideLoading() {
+            document.getElementById('loading').style.display = 'none';
+        }
+    </script>
+    <style>
+        /* 自定义滚动条样式 */
+        ::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background-color: #888;
+            border-radius: 4px;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background-color: #555;
+        }
+
+        ::-webkit-scrollbar-track {
+            background-color: #f1f1f1;
+            border-radius: 4px;
+        }
+
+        /* 表格样式 */
+        table {
+            border-collapse: collapse;
+            width: 100%;
+            white-space: nowrap;
+        }
+
+        th,
+        td {
+            padding: 4px;
+            text-align: left;
+            border-bottom: 1px solid #ddd;
+            font-size: 0.8rem;
+            line-height: 1.2;
+        }
+
+        th {
+            background-color: #f2f2f2;
+            font-weight: bold;
+        }
+
+        input[type="number"] {
+            width: 100%;
+            padding: 4px;
+            box-sizing: border-box;
+            font-size: 0.8rem;
+            line-height: 1.2;
+        }
+
+        /* 表格容器样式，使其自适应父容器并可滚动 */
+       .table-container {
+            width: 100%;
+            max-height: 300px;
+            overflow: auto;
+        }
+
+        /* 导航栏在小屏幕下变为垂直排列 */
+        @media (max-width: 768px) {
+            nav {
+                flex-direction: column;
+            }
+            nav a {
+                text-align: center;
+            }
+        }
+
+        /* 单词测验按钮在小屏幕下换行 */
+        #quiz .flex {
+            flex-wrap: wrap;
+        }
+        #quiz .flex button {
+            margin-bottom: 1rem;
+        }
+    </style>
+</head>
+
+<body class="font-sans bg-gray-100 text-gray-800">
+    <!-- 添加加载提示 -->
+    <div id="loading" class="fixed top-0 left-0 w-full h-full bg-white flex items-center justify-center z-50">
+        <div class="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-blue-600"></div>
+    </div>
+    <!-- 头部导航 -->
+    <header class="bg-blue-600 text-white text-center py-6 shadow-md mb-8 sticky top-0 z-20">
+        <h1 class="text-4xl font-bold">兜兜英语背单词</h1>
+    </header>
+    <!-- 导航栏 -->
+    <nav class="bg-blue-800 text-white flex justify-center mb-8 shadow-md">
+        <a href="#import" class="py-3 px-6 hover:bg-blue-900 transition-colors">词库导入</a>
+        <a href="#statistics" class="py-3 px-6 hover:bg-blue-900 transition-colors">学习统计</a>
+        <a href="#quiz" class="py-3 px-6 hover:bg-blue-900 transition-colors">单词测验</a>
+    </nav>
+    <!-- 主内容区域 -->
+    <main class="flex flex-col items-center px-4 md:px-16 lg:px-32 space-y-8">
+        <!-- 词库导入部分 -->
+        <div id="import" class="bg-white p-8 rounded-lg shadow-md w-full">
+            <h2 class="text-3xl font-bold mb-6">词库导入</h2>
+            <textarea id="word-input" placeholder="请输入英文单词-中文释义，每行一个"
+                class="w-full h-32 mb-4 p-3 border border-gray-300 rounded-md resize-y text-lg focus:ring-blue-500 focus:border-blue-500"></textarea>
+            <button onclick="importWords()"
+                class="bg-blue-600 text-white py-3 px-6 rounded-md hover:bg-blue-700 transition-colors text-lg shadow-md">
+                <i class="fa-solid fa-upload"></i> 导入词库
+            </button>
+        </div>
+        <!-- 学习统计部分 -->
+        <div id="statistics" class="bg-white p-8 rounded-lg shadow-md w-full">
+            <div class="flex justify-between items-center mb-6">
+                <h2 class="text-3xl font-bold">学习统计</h2>
+                <div class="flex space-x-4">
+                    <button onclick="exportToExcel()"
+                        class="bg-blue-600 text-white py-3 px-6 rounded-md hover:bg-blue-700 transition-colors text-lg shadow-md">
+                        <i class="fa-solid fa-file-excel"></i> 导出到 Excel
+                    </button>
+                    <button onclick="clearData()"
+                        class="bg-red-600 text-white py-3 px-6 rounded-md hover:bg-red-700 transition-colors text-lg shadow-md">
+                        <i class="fa-solid fa-trash"></i> 清空数据
+                    </button>
+                </div>
+            </div>
+            <div class="table-container overflow-x-auto mb-8 shadow-lg"> <!-- 使用表格容器 -->
+                <table class="min-w-max">
+                    <thead class="sticky top-0 bg-white">
+                        <tr>
+                            <th class="py-3 px-4 bg-gray-200 text-left font-bold border-b">英文单词</th>
+                            <th class="py-3 px-4 bg-gray-200 text-left font-bold border-b">中文释义</th>
+                            <th class="py-3 px-4 bg-gray-200 text-left font-bold border-b">默写次数</th>
+                            <th class="py-3 px-4 bg-gray-200 text-left font-bold border-b">正确次数</th>
+                            <th class="py-3 px-4 bg-gray-200 text-left font-bold border-b">错误次数</th>
+                            <th class="py-3 px-4 bg-gray-200 text-left font-bold border-b">错误率</th>
+                            <th class="py-3 px-4 bg-gray-200 text-left font-bold border-b">记忆层级</th>
+                            <th class="py-3 px-4 bg-gray-200 text-left font-bold border-b">操作</th>
+                        </tr>
+                    </thead>
+                    <tbody id="statistics-table-body">
+                    </tbody>
+                </table>
+            </div>
+        </div>
+        <!-- 单词测验部分 -->
+        <div id="quiz" class="bg-white p-8 rounded-lg shadow-md w-full">
+            <h2 class="text-3xl font-bold mb-6">单词测验</h2>
+            <div class="flex space-x-4 mb-6">
+                <button onclick="randomQuiz()"
+                    class="bg-blue-600 text-white py-3 px-6 rounded-md hover:bg-blue-700 transition-colors text-lg shadow-md">
+                    <i class="fa-solid fa-dice"></i> 智能抽题
+                </button>
+                <button onclick="showSelectionList()"
+                    class="bg-blue-600 text-white py-3 px-6 rounded-md hover:bg-blue-700 transition-colors text-lg shadow-md">
+                    <i class="fa-solid fa-list-check"></i> 自主选题
+                </button>
+            </div>
+            <input type="text" id="filter-input" placeholder="输入关键词筛选单词"
+                class="hidden w-full mb-4 p-3 border border-gray-300 rounded-md text-lg focus:ring-blue-500 focus:border-blue-500">
+            <div id="quiz-words"></div>
+            <div id="selection-list" class="hidden relative w-full max-h-96 overflow-y-auto">
+                <div class="sticky top-0 bg-white z-10 flex justify-between items-center p-4 border-b">
+                    <h2 class="text-xl font-bold">自主选题列表</h2>
+                    <div class="flex space-x-4">
+                        <input type="text" id="selection-search" placeholder="模糊搜索单词"
+                            class="p-2 border border-gray-300 rounded-md text-sm focus:ring-blue-500 focus:border-blue-500">
+                        <button onclick="applySelection()"
+                            class="bg-green-600 text-white py-2 px-4 rounded-md hover:bg-green-700 transition-colors text-sm shadow-md">应用选择</button>
+                    </div>
+                </div>
+                <table class="w-full">
+                    <thead>
+                        <tr>
+                            <th>选择</th>
+                            <th>英文单词</th>
+                            <th>中文释义</th>
+                            <th>默写次数</th>
+                            <th>错误率</th>
+                            <th>记忆层级</th>
+                        </tr>
+                    </thead>
+                    <tbody id="selection-list-table-body">
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </main>
+</body>
+
+</html>    
